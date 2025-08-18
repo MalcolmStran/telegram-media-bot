@@ -70,15 +70,6 @@ Scrape example:
 curl http://localhost:8000/metrics
 ```
 
-## 🛠 FFmpeg Provisioning
-Resolution order:
-1. `FFMPEG_LOCATION` directory
-2. System PATH
-3. Existing `ffmpeg_bin/`
-4. Automatic static Linux download into `ffmpeg_bin/`
-
-If none succeed the bot will fail during first post‑processing request.
-
 ## ⛑ Troubleshooting
 | Symptom | Cause | Fix |
 |---------|-------|-----|
@@ -87,22 +78,18 @@ If none succeed the bot will fail during first post‑processing request.
 | Long waits | Queue saturation | Increase `CONCURRENT_WORKERS` or reduce limits |
 | Large video rejected | Telegram size limit | Try shorter / lower res video (currently fixed mp4 selection) |
 
-## 🔐 Security Notes
-- Input is used in yt-dlp search; yt-dlp handles escaping, but keep the library updated.
-- Consider adding a private allowlist for production usage.
-- Avoid logging sensitive user content; current logs exclude raw file paths beyond need.
-
-## 🧪 Future Enhancements (Roadmap)
-- Test suite (pytest) with mocked yt-dlp & Shazam
-- Progress % if/when yt-dlp hook added
-- Prometheus histogram for job latency
-- Admin command for dynamic reconfig
-
 ## 🧾 License
-Add your preferred license (e.g. MIT) here.
+MIT License - see LICENSE file for details.
 
-## 🤝 Contributing
-PRs welcome: open issues for non-trivial changes first.
+## 🙏 Credits
+This project uses the following open-source libraries:
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) - Telegram Bot API wrapper
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Media download backend
+- [shazamio](https://github.com/dotX12/ShazamIO) - Audio recognition via Shazam
+- [prometheus-client](https://github.com/prometheus/client_python) - Metrics collection
+- [python-dotenv](https://github.com/theskumar/python-dotenv) - Environment variable loading
+
+Static FFmpeg binaries courtesy of [John Van Sickle](https://johnvansickle.com/ffmpeg/).
 
 ## 📝 Command Reference
 | Command | Description |
@@ -115,7 +102,5 @@ PRs welcome: open issues for non-trivial changes first.
 | /queue | Show pending items |
 | /cancel <pos|term> | Cancel your job |
 | /stats | Show processing counters |
-| /Hi_Arne | Easter egg image |
 
 ---
-Happy downloading! 🎶
