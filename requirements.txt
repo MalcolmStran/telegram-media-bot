@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]>=20.6  # core telegram bot framework
+python-dotenv>=1.0.0                  # .env loading
+yt-dlp>=2023.12.30                    # media download backend (needs ffmpeg executable installed separately)
+shazamio>=0.4.0                       # audio recognition
+prometheus-client>=0.20.0             # optional metrics endpoint
