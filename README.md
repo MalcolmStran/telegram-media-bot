@@ -1,6 +1,6 @@
 # Telegram Media Bot
 
-High‑performance Telegram bot for on‑demand audio/video retrieval (YouTube via yt‑dlp), song recognition, queued & concurrent processing, metrics, and persistent state.
+Telegram bot for on‑demand audio/video retrieval (YouTube via yt‑dlp), song recognition, queued & concurrent processing, metrics, and persistent state.
 
 ## ✨ Feature Summary
 | Area | Capabilities |
