@@ -5,11 +5,17 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-from config import BOT_TOKEN, LOG_LEVEL, CONCURRENT_WORKERS, METRICS_PORT
+from config import BOT_TOKEN, LOG_LEVEL, CONCURRENT_WORKERS, METRICS_PORT, SUBSCRIPTION_POLL_INTERVAL
 from downloads import download_audio, download_video, send_audio, send_video
 from queue_manager import queue, DownloadJob
 from recognition import recognize_audio_file
 from rate_limit import rate_limiter
+from subscriptions import (
+    subscriptions,
+    SubscriptionRecord,
+    fetch_channel_metadata,
+    ChannelMetadata,
+)
 
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -33,6 +39,9 @@ HELP_TEXT = (
     "/mp4 <query|url> - Queue video.\n"
     "Send a voice/audio message for recognition.\n"
     "/queue - Show pending items. /cancel <pos|term> - cancel your own.\n"
+    "/subscribe <channel> - Follow a YouTube channel for new uploads here.\n"
+    "/unsubscribe <channel> - Stop following a channel.\n"
+    "/subscriptions - List your followed channels.\n"
     "/stats - Show processing stats."
 )
 
@@ -112,6 +121,80 @@ async def mp4_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await _enqueue(update, " ".join(context.args), 'video')
 
+
+async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not message or not user or not chat:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /subscribe <YouTube channel URL or @handle>")
+        return
+    identifier = " ".join(context.args).strip()
+    try:
+        metadata = await fetch_channel_metadata(identifier)
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.warning("Channel lookup failed for %s: %s", identifier, exc)
+        await message.reply_text("Couldn't resolve that channel. Please provide a valid channel URL or @handle.")
+        return
+
+    latest = metadata.latest_videos[0] if metadata.latest_videos else None
+    channel_label = metadata.channel_title or metadata.channel_url
+    record = SubscriptionRecord(
+        user_id=user.id,  # type: ignore[arg-type]
+        chat_id=chat.id,
+        channel_url=metadata.channel_url,
+        channel_id=metadata.channel_id,
+        channel_title=metadata.channel_title,
+        last_video_id=latest.video_id if latest else None,
+        last_published=latest.timestamp if latest else None,
+    )
+    created, existing = await subscriptions.add_or_update(record)
+    if created:
+        suffix = " I'll keep an eye out for new uploads." if latest else " I'll watch for the first upload."
+        await message.reply_text(f"Subscribed to {channel_label}.{suffix}")
+    else:
+        existing_label = existing.channel_title or existing.channel_url
+        await message.reply_text(
+            f"You're already subscribed to {existing_label}. Updated the delivery chat just in case."
+        )
+
+
+async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user = update.effective_user
+    if not message or not user:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /unsubscribe <channel name|url|id>")
+        return
+    identifier = " ".join(context.args).strip()
+    removed = await subscriptions.remove(user.id, identifier)  # type: ignore[arg-type]
+    if removed:
+        title = removed.channel_title or removed.channel_url
+        await message.reply_text(f"Unsubscribed from {title}.")
+    else:
+        await message.reply_text("No matching subscription found.")
+
+
+async def subscriptions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user = update.effective_user
+    if not message or not user:
+        return
+    subs = await subscriptions.list_for_user(user.id)  # type: ignore[arg-type]
+    if not subs:
+        await message.reply_text("You have no channel subscriptions. Use /subscribe <channel> to add one.")
+        return
+    lines = []
+    for idx, sub in enumerate(subs, start=1):
+        lines.append(f"{idx}. {sub.channel_title or sub.channel_url}\n   {sub.channel_url}")
+    await message.reply_text("Subscribed channels:\n" + "\n".join(lines[:30]))
+
 async def queue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -145,6 +228,115 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"Processed: {stats['processed']} (audio {stats['audio']}, video {stats['video']}), failed {stats['failed']}"
         )
+
+
+async def poll_subscriptions(context: ContextTypes.DEFAULT_TYPE):
+    await subscriptions.load()
+    all_subs = await subscriptions.all_subscriptions()
+    if not all_subs:
+        return
+
+    metadata_cache: Dict[str, ChannelMetadata] = {}
+    for sub in all_subs:
+        channel_key = sub.channel_id or sub.channel_url
+        metadata = metadata_cache.get(channel_key)
+        if metadata is None:
+            try:
+                metadata = await fetch_channel_metadata(sub.channel_url)
+            except Exception as exc:  # pragma: no cover - network errors
+                logger.warning(
+                    "Subscription poll failed for user %s channel %s: %s",
+                    sub.user_id,
+                    sub.channel_url,
+                    exc,
+                )
+                continue
+            cache_key = metadata.channel_id or channel_key
+            metadata_cache[cache_key] = metadata
+            metadata_cache[channel_key] = metadata
+
+        await subscriptions.update_last_video(
+            sub.user_id,
+            metadata.channel_id or sub.channel_id,
+            None,
+            sub.last_published,
+            channel_url=metadata.channel_url,
+            channel_title=metadata.channel_title,
+        )
+
+        videos = metadata.latest_videos
+        if not videos:
+            continue
+
+        if not sub.last_video_id:
+            latest = videos[0]
+            await subscriptions.update_last_video(
+                sub.user_id,
+                metadata.channel_id or sub.channel_id,
+                latest.video_id,
+                latest.timestamp,
+                channel_url=metadata.channel_url,
+                channel_title=metadata.channel_title,
+            )
+            continue
+
+        new_videos = []
+        for video in videos:
+            if video.video_id == sub.last_video_id:
+                break
+            new_videos.append(video)
+
+        if not new_videos:
+            continue
+
+        new_videos.reverse()
+        last_processed = None
+        for video in new_videos:
+            job = DownloadJob(
+                chat_id=sub.chat_id,
+                query=video.video_url,
+                kind='video',
+                user_id=sub.user_id,
+                request_message_id=None,
+            )
+            try:
+                position = await queue.add(job)
+                last_processed = video
+                await context.bot.send_message(
+                    chat_id=sub.chat_id,
+                    text=(
+                        f"New upload from {metadata.channel_title}: {video.title}\n"
+                        f"{video.video_url}\nQueued (position {position})."
+                    ),
+                )
+                if METRICS_ENABLED:
+                    m_queue_size.set(queue.size())
+            except OverflowError:
+                await context.bot.send_message(
+                    chat_id=sub.chat_id,
+                    text=(
+                        f"Queue full - couldn't queue '{video.title}' from {metadata.channel_title}. "
+                        "I'll try again soon."
+                    ),
+                )
+                break
+            except Exception as exc:  # pragma: no cover - network errors
+                logger.error(
+                    "Failed to queue subscription video for user %s: %s",
+                    sub.user_id,
+                    exc,
+                )
+                break
+
+        if last_processed:
+            await subscriptions.update_last_video(
+                sub.user_id,
+                metadata.channel_id or sub.channel_id,
+                last_processed.video_id,
+                last_processed.timestamp,
+                channel_url=metadata.channel_url,
+                channel_title=metadata.channel_title,
+            )
 
 async def audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -209,6 +401,7 @@ async def worker(app: Application, worker_id: int):
 
 async def on_start(app: Application):
     await queue.load()
+    await subscriptions.load()
     for i in range(CONCURRENT_WORKERS):
         app.create_task(worker(app, i))
     if METRICS_ENABLED and callable(start_http_server):  # type: ignore
@@ -218,6 +411,13 @@ async def on_start(app: Application):
         except Exception as e:
             logger.warning(f"Metrics server failed to start: {e}")
     logger.info("Workers started; queue size %d", queue.size())
+    if app.job_queue:
+        app.job_queue.run_repeating(
+            poll_subscriptions,
+            interval=SUBSCRIPTION_POLL_INTERVAL,
+            first=30,
+            name="subscription-poll",
+        )
 
 def main():
     # BOT_TOKEN validated non-empty in config
@@ -232,6 +432,9 @@ def main():
     application.add_handler(CommandHandler('queue', queue_cmd))
     application.add_handler(CommandHandler('cancel', cancel_cmd))
     application.add_handler(CommandHandler('stats', stats_cmd))
+    application.add_handler(CommandHandler('subscribe', subscribe_cmd))
+    application.add_handler(CommandHandler('unsubscribe', unsubscribe_cmd))
+    application.add_handler(CommandHandler('subscriptions', subscriptions_cmd))
 
     application.add_handler(MessageHandler(filters.AUDIO | filters.VOICE, audio_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))

@@ -5,7 +5,7 @@ Telegram bot for on‑demand audio/video retrieval (YouTube via yt‑dlp), song 
 ## ✨ Feature Summary
 | Area | Capabilities |
 |------|--------------|
-| Downloads | Audio (mp3) & video (mp4) via yt-dlp with duration limits, caching, concurrency |
+| Downloads | Audio (mp3) & video (mp4) via yt-dlp with smart format selection, 2 GB size limit, caching, concurrency |
 | Queue | Persistent across restarts, cancel by position/substring, duplicate suppression |
 | Recognition | Voice / audio message song ID via Shazam (shazamio) |
 | Rate Limiting | Per-user sliding window to prevent abuse |
@@ -13,6 +13,7 @@ Telegram bot for on‑demand audio/video retrieval (YouTube via yt‑dlp), song 
 | Progress UX | Chat actions + progress message edit on completion |
 | Resilience | Automatic ffmpeg provisioning (static build download) |
 | Configurability | All tunables via environment variables |
+| Subscriptions | Follow channels and auto-queue new uploads every 10 minutes |
 
 ## 🗂 Project Structure
 ```
@@ -30,20 +31,25 @@ downloads/             # Runtime cache + tmp + queue state
 - Python 3.10+
 - Network access to YouTube and (optionally) johnvansickle.com for first ffmpeg fetch
 - Telegram Bot Token from @BotFather
-- Deno JavaScript runtime (auto-installed by the bot when `AUTO_INSTALL_DENO=true`, or provide `DENO_PATH`)
+- Deno JavaScript runtime (place `deno`/`deno.exe` in the project root or ensure it's on PATH)
 
 ## ⚙️ Configuration
 Copy `.env.example` to `.env` and adjust as needed. All options are documented inline.
 
 ### JavaScript runtime for YouTube extraction
-Recent YouTube changes require yt-dlp to run certain scripts with an external JavaScript runtime. By default the bot will download a portable Deno binary into `deno_bin/` on first launch (`AUTO_INSTALL_DENO=true`).
+Recent YouTube changes require yt-dlp to run certain scripts with an external JavaScript runtime. This project assumes the Deno executable lives in the repository root (`./deno` or `./deno.exe`) or is accessible on your system `PATH`.
 
-If you prefer to manage it yourself, set:
+If Deno is elsewhere, set `DENO_PATH` in your `.env` to point at the executable. When no runtime is found, the bot logs a warning and YouTube downloads will likely fail until Deno is installed from [https://deno.land](https://deno.land).
 
-- `ENABLE_JS_RUNTIME=false` to disable automatic provisioning (YouTube downloads will then fail), or
-- `DENO_PATH` to point at an existing `deno` executable, and optionally `DENO_VERSION`/`DENO_INSTALL_DIR` to pin or relocate the managed binary.
+### Channel subscriptions
+Users can follow YouTube channels with `/subscribe <channel>` (URL or `@handle`). The bot polls every 10 minutes by default and queues new uploads as video jobs in the chat where the subscription was created. Configure:
 
-When provisioning fails the bot exits with guidance so you can install Deno manually from [https://deno.land](https://deno.land) and set `DENO_PATH`.
+- `SUBSCRIPTION_POLL_INTERVAL` (seconds, default `600`) to change the polling cadence.
+- `SUBSCRIPTIONS_FILE` to relocate the persisted subscription store (defaults to `downloads/subscriptions.json`).
+- `MAX_VIDEO_SIZE_MB` caps the size of delivered videos (default `2048` MB). Oversized downloads are recompressed with two-pass H.265/Opus to fit.
+- `TRANSCODE_TARGET_SIZE_MB` sets the approximate size goal for recompressed videos (default `500` MB).
+- `YTDLP_CONCURRENT_FRAGMENTS`, `YTDLP_HTTP_CHUNK_SIZE`, and `YTDLP_SOCKET_TIMEOUT` tune yt-dlp download concurrency and chunking if you encounter slow YouTube transfers. Set `YTDLP_FORCE_IPV4=false` to allow IPv6 if it performs better in your region.
+	The bot prefers native MP4 formats that already sit under `TRANSCODE_TARGET_SIZE_MB` before falling back to re-encoding.
 
 ## 🚀 Quick Start
 ```bash
@@ -113,5 +119,8 @@ Static FFmpeg binaries courtesy of [John Van Sickle](https://johnvansickle.com/f
 | /queue | Show pending items |
 | /cancel <pos|term> | Cancel your job |
 | /stats | Show processing counters |
+| /subscribe <channel> | Follow a YouTube channel for auto-uploads |
+| /unsubscribe <channel> | Stop following a channel |
+| /subscriptions | List your followed channels |
 
 ---
