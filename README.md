@@ -30,9 +30,20 @@ downloads/             # Runtime cache + tmp + queue state
 - Python 3.10+
 - Network access to YouTube and (optionally) johnvansickle.com for first ffmpeg fetch
 - Telegram Bot Token from @BotFather
+- Deno JavaScript runtime (auto-installed by the bot when `AUTO_INSTALL_DENO=true`, or provide `DENO_PATH`)
 
 ## ⚙️ Configuration
 Copy `.env.example` to `.env` and adjust as needed. All options are documented inline.
+
+### JavaScript runtime for YouTube extraction
+Recent YouTube changes require yt-dlp to run certain scripts with an external JavaScript runtime. By default the bot will download a portable Deno binary into `deno_bin/` on first launch (`AUTO_INSTALL_DENO=true`).
+
+If you prefer to manage it yourself, set:
+
+- `ENABLE_JS_RUNTIME=false` to disable automatic provisioning (YouTube downloads will then fail), or
+- `DENO_PATH` to point at an existing `deno` executable, and optionally `DENO_VERSION`/`DENO_INSTALL_DIR` to pin or relocate the managed binary.
+
+When provisioning fails the bot exits with guidance so you can install Deno manually from [https://deno.land](https://deno.land) and set `DENO_PATH`.
 
 ## 🚀 Quick Start
 ```bash

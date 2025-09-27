@@ -19,6 +19,7 @@ from config import (
     THROTTLED_RATE,
     CACHE_ENABLED,
     CACHE_TTL,
+    JS_RUNTIME_CONFIG,
 )
 try:
     from ffmpeg_setup import FFMPEG_DIR
@@ -40,8 +41,8 @@ def _build_cache_key(kind: str, query: str) -> str:
     return f"{kind}-{h}.mp3" if kind == "audio" else f"{kind}-{h}.mp4"
 
 
-def _yt_base_opts():
-    base = {
+def _yt_base_opts() -> Dict[str, Any]:
+    base: Dict[str, Any] = {
         'noplaylist': True,
         'force_ipv4': True,
         'restrictfilenames': True,
@@ -52,10 +53,12 @@ def _yt_base_opts():
         base['throttled_rate'] = THROTTLED_RATE
     if FFMPEG_DIR:
         base['ffmpeg_location'] = FFMPEG_DIR
+    if JS_RUNTIME_CONFIG:
+        base['js_runtimes'] = JS_RUNTIME_CONFIG
     return base
 
 
-def _audio_opts():
+def _audio_opts() -> Dict[str, Any]:
     o = _yt_base_opts()
     o.update({
         'format': 'bestaudio/best',
@@ -68,7 +71,7 @@ def _audio_opts():
     return o
 
 
-def _video_opts():
+def _video_opts() -> Dict[str, Any]:
     o = _yt_base_opts()
     o.update({
         'format': 'mp4',
@@ -85,7 +88,7 @@ async def search_and_resolve(query: str, ydl: youtube_dl.YoutubeDL) -> Optional[
         try:
             info_raw = ydl.extract_info(query, download=False)
             if isinstance(info_raw, dict) and 'duration' in info_raw:
-                return info_raw
+                return cast(Dict[str, Any], info_raw)
         except Exception as e:
             logger.warning(f"Direct URL failed, fallback to search: {e}")
     try:
@@ -95,7 +98,7 @@ async def search_and_resolve(query: str, ydl: youtube_dl.YoutubeDL) -> Optional[
             if isinstance(entries, list) and entries:
                 first = entries[0]
                 if isinstance(first, dict):
-                    return first
+                    return cast(Dict[str, Any], first)
     except Exception as e:
         logger.error(f"Search failed: {e}")
     return None
@@ -107,8 +110,8 @@ async def download_audio(query: str) -> Tuple[str, str]:
     if CACHE_ENABLED and os.path.exists(cache_path):
         if time.time() - os.path.getmtime(cache_path) < CACHE_TTL:
             return cache_path, os.path.splitext(os.path.basename(cache_path))[0]
-    opts = _audio_opts()
-    with youtube_dl.YoutubeDL(opts) as ydl:
+    opts: Dict[str, Any] = _audio_opts()
+    with youtube_dl.YoutubeDL(cast(Any, opts)) as ydl:
         info = await search_and_resolve(query, ydl)
         if not info:
             raise ValueError("Could not find audio")
@@ -135,8 +138,8 @@ async def download_video(query: str) -> Tuple[str, str]:
     if CACHE_ENABLED and os.path.exists(cache_path):
         if time.time() - os.path.getmtime(cache_path) < CACHE_TTL:
             return cache_path, os.path.splitext(os.path.basename(cache_path))[0]
-    opts = _video_opts()
-    with youtube_dl.YoutubeDL(opts) as ydl:
+    opts: Dict[str, Any] = _video_opts()
+    with youtube_dl.YoutubeDL(cast(Any, opts)) as ydl:
         info = await search_and_resolve(query, ydl)
         if not info:
             raise ValueError("Could not find video")
