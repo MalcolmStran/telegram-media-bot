@@ -1,6 +1,7 @@
 import logging
 from typing import Dict
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
@@ -361,30 +362,55 @@ async def worker(app: Application, worker_id: int):
         job = await queue.get()
         chat_id = job.chat_id
         progress_message = None
+        last_progress_text = None
+        display_kind = 'Audio' if job.kind == 'audio' else 'Video'
+        query_preview = job.query if len(job.query) <= 180 else job.query[:177] + '...'
+
+        async def update_progress(status: str) -> None:
+            nonlocal progress_message, last_progress_text
+            if not progress_message:
+                return
+            new_text = f"{display_kind} '{query_preview}': {status}"
+            if new_text == last_progress_text:
+                return
+            try:
+                edited = await app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=progress_message.message_id,
+                    text=new_text,
+                )
+                progress_message = edited
+                last_progress_text = new_text
+            except BadRequest as exc:
+                if 'message is not modified' in str(exc).lower():
+                    return
+                logger.debug("Progress edit failed: %s", exc)
+            except Exception as exc:
+                logger.debug("Progress edit failed: %s", exc)
         try:
             # send chat action
             await app.bot.send_chat_action(chat_id=chat_id, action='upload_audio' if job.kind=='audio' else 'upload_video')
-            progress_message = await app.bot.send_message(chat_id=chat_id, text=f"Downloading {job.kind}: {job.query}")
+            initial_text = f"{display_kind} '{query_preview}': downloading..."
+            progress_message = await app.bot.send_message(chat_id=chat_id, text=initial_text)
+            last_progress_text = initial_text
             if job.kind == 'audio':
                 path, title = await download_audio(job.query)
+                await update_progress("Uploading...")
                 await app.bot.send_chat_action(chat_id=chat_id, action='upload_audio')
                 await send_audio(app.bot, chat_id, path, title)
                 stats['audio'] += 1
                 if METRICS_ENABLED:
                     m_jobs_processed.labels('audio').inc()
             else:
-                path, title = await download_video(job.query)
+                path, title = await download_video(job.query, update_progress)
+                await update_progress("Uploading...")
                 await app.bot.send_chat_action(chat_id=chat_id, action='upload_video')
                 await send_video(app.bot, chat_id, path, title)
                 stats['video'] += 1
                 if METRICS_ENABLED:
                     m_jobs_processed.labels('video').inc()
             stats['processed'] += 1
-            if progress_message:
-                try:
-                    await app.bot.edit_message_text(chat_id=chat_id, message_id=progress_message.message_id, text=f"Done: {job.query}")
-                except Exception:
-                    pass
+            await update_progress("Done.")
         except Exception as e:
             stats['failed'] += 1
             logger.error(f"Job failed: {e}")
