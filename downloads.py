@@ -343,59 +343,72 @@ async def download_video(query: str) -> Tuple[str, str]:
     if CACHE_ENABLED and os.path.exists(cache_path):
         if time.time() - os.path.getmtime(cache_path) < CACHE_TTL:
             return cache_path, os.path.splitext(os.path.basename(cache_path))[0]
-    opts: Dict[str, Any] = _video_opts()
-    with youtube_dl.YoutubeDL(cast(Any, opts)) as ydl:
-        info = await search_and_resolve(query, ydl)
+
+    base_opts: Dict[str, Any] = _video_opts()
+    download_opts: Dict[str, Any] = dict(base_opts)
+
+    duration: Optional[float] = None
+    video_url: Optional[str] = None
+
+    with youtube_dl.YoutubeDL(cast(Any, base_opts)) as metadata_ydl:
+        info = await search_and_resolve(query, metadata_ydl)
         if not info:
             raise ValueError("Could not find video")
         duration = info.get('duration') if isinstance(info, dict) else None
-        detailed_info = ydl.extract_info(info['webpage_url'], download=False)
-        selected_format = None
+        video_url = info.get('webpage_url') or info.get('url')
+        if not isinstance(video_url, str):
+            raise ValueError("Unable to resolve video URL")
+
+        detailed_info = metadata_ydl.extract_info(video_url, download=False)
         if isinstance(detailed_info, dict):
             selected_format = _select_progressive_format_within_size(
                 cast(Dict[str, Any], detailed_info), TRANSCODE_SIZE_LIMIT
             )
             if selected_format:
-                fmt_id = selected_format.get('format_id')
+                fmt_id = str(selected_format.get('format_id') or "")
                 if fmt_id:
-                    ydl.params['format'] = fmt_id
+                    download_opts['format'] = fmt_id
                     approx_size = selected_format.get('filesize') or selected_format.get('filesize_approx')
+                    human_title = detailed_info.get('title') or query
                     if approx_size:
                         logger.info(
                             "Using pre-sized format %s (~%.1f MB) for %s",
                             fmt_id,
                             approx_size / (1024 * 1024),
-                            detailed_info.get('title') or query,
+                            human_title,
                         )
                     else:
-                        logger.info(
-                            "Using pre-sized format %s for %s",
-                            fmt_id,
-                            detailed_info.get('title') or query,
-                        )
-        info_dl = ydl.extract_info(info['webpage_url'], download=True)
+                        logger.info("Using pre-sized format %s for %s", fmt_id, human_title)
+
+    if not video_url:
+        raise ValueError("No video URL found for download")
+
+    with youtube_dl.YoutubeDL(cast(Any, download_opts)) as download_ydl:
+        info_dl = download_ydl.extract_info(video_url, download=True)
         if not isinstance(info_dl, dict):
             raise ValueError("Unexpected download metadata format")
-        file_name = ydl.prepare_filename(info_dl)
-        base, _ = os.path.splitext(file_name)
-        mp4_file = base + '.mp4'
-        if not os.path.exists(mp4_file):
-            raise FileNotFoundError("mp4 output missing")
-        duration = info_dl.get('duration', duration)
-        size_threshold = TRANSCODE_SIZE_LIMIT
-        current_size = os.path.getsize(mp4_file)
-        if current_size <= size_threshold:
-            source_path = mp4_file
-        else:
-            try:
-                source_path = await _ensure_video_within_size(mp4_file, duration, MAX_VIDEO_SIZE_LIMIT)
-            except Exception as exc:
-                raise ValueError(f"Failed to compress video under size limit: {exc}") from exc
+        file_name = download_ydl.prepare_filename(info_dl)
 
-        final_path = cache_path if CACHE_ENABLED else os.path.join(DOWNLOADS_DIR, os.path.basename(source_path))
-        os.replace(source_path, final_path)
-        title = info_dl.get('title') if isinstance(info_dl, dict) else None
-        return final_path, (title or query)
+    base, _ = os.path.splitext(file_name)
+    mp4_file = base + '.mp4'
+    if not os.path.exists(mp4_file):
+        raise FileNotFoundError("mp4 output missing")
+
+    duration = info_dl.get('duration', duration)
+    size_threshold = TRANSCODE_SIZE_LIMIT
+    current_size = os.path.getsize(mp4_file)
+    if current_size <= size_threshold:
+        source_path = mp4_file
+    else:
+        try:
+            source_path = await _ensure_video_within_size(mp4_file, duration, MAX_VIDEO_SIZE_LIMIT)
+        except Exception as exc:
+            raise ValueError(f"Failed to compress video under size limit: {exc}") from exc
+
+    final_path = cache_path if CACHE_ENABLED else os.path.join(DOWNLOADS_DIR, os.path.basename(source_path))
+    os.replace(source_path, final_path)
+    title = info_dl.get('title') if isinstance(info_dl, dict) else None
+    return final_path, (title or query)
 
 async def send_audio(bot, chat_id: int, path: str, title: str):
     try:

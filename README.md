@@ -5,7 +5,7 @@ Telegram bot for on‑demand audio/video retrieval (YouTube via yt‑dlp), song 
 ## ✨ Feature Summary
 | Area | Capabilities |
 |------|--------------|
-| Downloads | Audio (mp3) & video (mp4) via yt-dlp with smart format selection, 2 GB size limit, caching, concurrency |
+| Downloads | Audio (mp3) & video (mp4) via yt-dlp with smart format selection, 50 MB Telegram cap, caching, concurrency |
 | Queue | Persistent across restarts, cancel by position/substring, duplicate suppression |
 | Recognition | Voice / audio message song ID via Shazam (shazamio) |
 | Rate Limiting | Per-user sliding window to prevent abuse |
@@ -46,8 +46,8 @@ Users can follow YouTube channels with `/subscribe <channel>` (URL or `@handle`)
 
 - `SUBSCRIPTION_POLL_INTERVAL` (seconds, default `600`) to change the polling cadence.
 - `SUBSCRIPTIONS_FILE` to relocate the persisted subscription store (defaults to `downloads/subscriptions.json`).
-- `MAX_VIDEO_SIZE_MB` caps the size of delivered videos (default `2048` MB). Oversized downloads are recompressed with two-pass H.265/Opus to fit.
-- `TRANSCODE_TARGET_SIZE_MB` sets the approximate size goal for recompressed videos (default `500` MB).
+- `MAX_VIDEO_SIZE_MB` caps the size of delivered videos (default `50` MB to honor Telegram's bot limit). Oversized downloads are recompressed with two-pass H.265/Opus to fit.
+- `TRANSCODE_TARGET_SIZE_MB` sets the approximate size goal for recompressed videos (default `48` MB to leave headroom).
 - `YTDLP_CONCURRENT_FRAGMENTS`, `YTDLP_HTTP_CHUNK_SIZE`, and `YTDLP_SOCKET_TIMEOUT` tune yt-dlp download concurrency and chunking if you encounter slow YouTube transfers. Set `YTDLP_FORCE_IPV4=false` to allow IPv6 if it performs better in your region.
 	The bot prefers native MP4 formats that already sit under `TRANSCODE_TARGET_SIZE_MB` before falling back to re-encoding.
 
