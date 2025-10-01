@@ -2,8 +2,10 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict
+import time
+from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import yt_dlp as youtube_dl
 
@@ -37,7 +39,66 @@ class SubscriptionRecord:
     channel_title: str
     last_video_id: Optional[str] = None
     last_published: Optional[float] = None
+    delivered_video_ids: List[str] = field(default_factory=list)
+    subscribed_at: Optional[float] = None
 
+
+def _canonicalize_video_id(raw: str) -> str:
+    value = str(raw).strip()
+    if not value:
+        return value
+    if value.startswith("http"):
+        parsed = urlparse(value)
+        if parsed.netloc.endswith("youtu.be"):
+            candidate = parsed.path.lstrip("/").split("/")[0]
+            if candidate:
+                value = candidate
+        else:
+            path = parsed.path.lstrip("/")
+            for prefix in ("shorts/", "live/", "embed/"):
+                if path.startswith(prefix):
+                    candidate = path[len(prefix):].split("/")[0]
+                    if candidate:
+                        value = candidate
+                        break
+            query = parse_qs(parsed.query)
+            vid = query.get("v")
+            if vid and vid[0]:
+                value = vid[0]
+    if ":" in value:
+        value = value.split(":")[-1]
+    return value
+
+
+def _normalize_delivered_list(items: Optional[List[str]]) -> List[str]:
+    if not items:
+        return []
+    seen: set[str] = set()
+    normalized: List[str] = []
+    for raw in items:
+        if not raw:
+            continue
+        vid = _canonicalize_video_id(raw)
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        normalized.append(vid)
+    # keep only the most recent 50 entries to bound storage
+    return normalized[-50:]
+
+
+def _append_delivered(record: SubscriptionRecord, video_id: Optional[str]) -> None:
+    if not video_id:
+        return
+    vid = _canonicalize_video_id(video_id)
+    if not vid:
+        return
+    delivered = record.delivered_video_ids
+    if vid in delivered:
+        return
+    delivered.append(vid)
+    if len(delivered) > 50:
+        record.delivered_video_ids = delivered[-50:]
 
 class SubscriptionManager:
     def __init__(self, storage_path: str):
@@ -68,6 +129,16 @@ class SubscriptionManager:
                 for item in entries:
                     if not isinstance(item, dict):
                         continue
+                    last_video_id = item.get("last_video_id")
+                    if last_video_id:
+                        last_video_id = _canonicalize_video_id(str(last_video_id))
+                    delivered = []
+                    delivered_raw = item.get("delivered_video_ids")
+                    if isinstance(delivered_raw, list):
+                        delivered = _normalize_delivered_list(delivered_raw)
+                        if last_video_id and last_video_id not in delivered:
+                            delivered.append(last_video_id)
+                            delivered = _normalize_delivered_list(delivered)
                     records.append(
                         SubscriptionRecord(
                             user_id=user_id,
@@ -75,8 +146,10 @@ class SubscriptionManager:
                             channel_url=item.get("channel_url", ""),
                             channel_id=item.get("channel_id", ""),
                             channel_title=item.get("channel_title", ""),
-                            last_video_id=item.get("last_video_id"),
+                            last_video_id=last_video_id,
                             last_published=item.get("last_published"),
+                            delivered_video_ids=delivered,
+                            subscribed_at=item.get("subscribed_at") or item.get("last_published"),
                         )
                     )
             if records:
@@ -98,15 +171,33 @@ class SubscriptionManager:
     async def add_or_update(self, record: SubscriptionRecord) -> Tuple[bool, SubscriptionRecord]:
         async with self._lock:
             await self.load()
+            record.channel_id = str(record.channel_id)
+            record.channel_url = str(record.channel_url or "").strip()
+            record.channel_title = record.channel_title.strip() if record.channel_title else record.channel_title
+            if record.last_video_id:
+                record.last_video_id = _canonicalize_video_id(record.last_video_id)
+            record.delivered_video_ids = _normalize_delivered_list(record.delivered_video_ids)
+            if record.last_video_id and record.last_video_id not in record.delivered_video_ids:
+                record.delivered_video_ids.append(record.last_video_id)
+                record.delivered_video_ids = _normalize_delivered_list(record.delivered_video_ids)
+            if not record.subscribed_at:
+                record.subscribed_at = record.last_published or time.time()
             subs = self._subscriptions.setdefault(record.user_id, [])
             for existing in subs:
                 if existing.channel_id == record.channel_id or existing.channel_url.lower() == record.channel_url.lower():
                     existing.chat_id = record.chat_id
                     existing.channel_url = record.channel_url
                     existing.channel_title = record.channel_title
+                    existing.delivered_video_ids = _normalize_delivered_list(existing.delivered_video_ids)
+                    if record.delivered_video_ids:
+                        for vid in record.delivered_video_ids:
+                            _append_delivered(existing, vid)
                     if record.last_video_id:
                         existing.last_video_id = record.last_video_id
+                    if record.last_published:
                         existing.last_published = record.last_published
+                    if record.subscribed_at:
+                        existing.subscribed_at = record.subscribed_at
                     await self._save()
                     return False, existing
             subs.append(record)
@@ -152,6 +243,7 @@ class SubscriptionManager:
         published: Optional[float],
         channel_url: Optional[str] = None,
         channel_title: Optional[str] = None,
+        mark_seen: bool = False,
     ) -> bool:
         async with self._lock:
             await self.load()
@@ -160,9 +252,18 @@ class SubscriptionManager:
                 return False
             for existing in subs:
                 if existing.channel_id == channel_id or (channel_url and existing.channel_url == channel_url):
+                    existing.delivered_video_ids = _normalize_delivered_list(existing.delivered_video_ids)
                     if video_id:
-                        existing.last_video_id = video_id
-                    existing.last_published = published
+                        canonical_id = _canonicalize_video_id(video_id)
+                        existing.last_video_id = canonical_id
+                        if mark_seen:
+                            _append_delivered(existing, canonical_id)
+                    elif mark_seen:
+                        existing.delivered_video_ids = _normalize_delivered_list(existing.delivered_video_ids)
+                    if published is not None:
+                        existing.last_published = published
+                    if mark_seen and not existing.subscribed_at:
+                        existing.subscribed_at = published or time.time()
                     if channel_id:
                         existing.channel_id = channel_id
                     if channel_url:
@@ -193,6 +294,7 @@ def _normalize_video_entry(entry: dict) -> Optional[VideoEntry]:
     video_id = entry.get("id") or entry.get("url")
     if not video_id:
         return None
+    video_id = _canonicalize_video_id(str(video_id))
     raw_url = entry.get("url") or ""
     if raw_url.startswith("http"):
         video_url = raw_url

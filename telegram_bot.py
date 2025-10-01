@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Dict
 from telegram import Update
 from telegram.error import BadRequest
@@ -153,6 +154,8 @@ async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_title=metadata.channel_title,
         last_video_id=latest.video_id if latest else None,
         last_published=latest.timestamp if latest else None,
+        delivered_video_ids=[latest.video_id] if latest else [],
+        subscribed_at=time.time(),
     )
     created, existing = await subscriptions.add_or_update(record)
     if created:
@@ -269,6 +272,8 @@ async def poll_subscriptions(context: ContextTypes.DEFAULT_TYPE):
         if not videos:
             continue
 
+        delivered_ids = set(sub.delivered_video_ids or [])
+        subscription_cutoff = sub.subscribed_at
         if not sub.last_video_id:
             latest = videos[0]
             await subscriptions.update_last_video(
@@ -278,21 +283,27 @@ async def poll_subscriptions(context: ContextTypes.DEFAULT_TYPE):
                 latest.timestamp,
                 channel_url=metadata.channel_url,
                 channel_title=metadata.channel_title,
+                mark_seen=True,
             )
             continue
 
         new_videos = []
+        boundary_timestamp = sub.last_published
         for video in videos:
-            if video.video_id == sub.last_video_id:
+            if sub.last_video_id and video.video_id == sub.last_video_id:
+                break
+            if video.video_id in delivered_ids:
+                break
+            if subscription_cutoff and video.timestamp and video.timestamp <= subscription_cutoff:
+                break
+            if boundary_timestamp and video.timestamp and video.timestamp <= boundary_timestamp:
                 break
             new_videos.append(video)
 
         if not new_videos:
             continue
 
-        new_videos.reverse()
-        last_processed = None
-        for video in new_videos:
+        for video in reversed(new_videos):
             job = DownloadJob(
                 chat_id=sub.chat_id,
                 query=video.video_url,
@@ -302,7 +313,6 @@ async def poll_subscriptions(context: ContextTypes.DEFAULT_TYPE):
             )
             try:
                 position = await queue.add(job)
-                last_processed = video
                 await context.bot.send_message(
                     chat_id=sub.chat_id,
                     text=(
@@ -310,6 +320,16 @@ async def poll_subscriptions(context: ContextTypes.DEFAULT_TYPE):
                         f"{video.video_url}\nQueued (position {position})."
                     ),
                 )
+                await subscriptions.update_last_video(
+                    sub.user_id,
+                    metadata.channel_id or sub.channel_id,
+                    video.video_id,
+                    video.timestamp,
+                    channel_url=metadata.channel_url,
+                    channel_title=metadata.channel_title,
+                    mark_seen=True,
+                )
+                delivered_ids.add(video.video_id)
                 if METRICS_ENABLED:
                     m_queue_size.set(queue.size())
             except OverflowError:
@@ -328,16 +348,6 @@ async def poll_subscriptions(context: ContextTypes.DEFAULT_TYPE):
                     exc,
                 )
                 break
-
-        if last_processed:
-            await subscriptions.update_last_video(
-                sub.user_id,
-                metadata.channel_id or sub.channel_id,
-                last_processed.video_id,
-                last_processed.timestamp,
-                channel_url=metadata.channel_url,
-                channel_title=metadata.channel_title,
-            )
 
 async def audio_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
